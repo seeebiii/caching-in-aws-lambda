@@ -1,0 +1,14 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Simple caching in AWS Lambda.
+
+Resources:
+  SimpleLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs8.10
+      Timeout: 10
+      CodeUri: ./target
+      Policies:
+      - AWSLambdaBasicExecutionRole

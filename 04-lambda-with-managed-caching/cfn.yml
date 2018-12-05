@@ -1,0 +1,203 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Example of caching with ElastiCache and accessing it with AWS Lambda.
+
+Resources:
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: "10.0.0.0/16"
+
+  #####################################
+  ## Public Subnet Configuration     ##
+  #####################################
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  GatewayToInternet:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayToInternet
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Join ["", [!Ref "AWS::Region", "a"]]
+      CidrBlock: "10.0.0.0/24"
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: !Ref VPC
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: GatewayToInternet
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+
+
+  #####################################
+  ## Lambda VPC Subnet Configuration ##
+  #####################################
+
+  LambdaRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  LambdaRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref LambdaRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NatGateway
+
+  LambdaSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Join ["", [!Ref "AWS::Region", "a"]]
+      CidrBlock: "10.0.128.0/18" # ~16k ip's available for Lambda instances
+      VpcId: !Ref VPC
+
+  LambdaSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Join ["", [!Ref "AWS::Region", "b"]]
+      CidrBlock: "10.0.192.0/18" # ~16k ip's available for Lambda instances
+      VpcId: !Ref VPC
+
+  LambdaSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref LambdaSubnetA
+      RouteTableId: !Ref LambdaRouteTable
+
+  LambdaSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref LambdaSubnetB
+      RouteTableId: !Ref LambdaRouteTable
+
+  # don't allow any specific inbound / outbound => by default inbound traffic is allowed from within the security group and
+  # by default all outbound traffic is allowed (though the outbound traffic might be blocked by something else)
+  # => if you need to call a Lambda function from outside this security group, you should allow this somehow here or
+  # put the other function into this security group as well.
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Lambda Security Group"
+      VpcId: !Ref VPC
+
+
+  ###############################
+  ## ElastiCache Configuration ##
+  ###############################
+
+  CacheSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Join ["", [!Ref "AWS::Region", "a"]]
+      CidrBlock: "10.0.1.0/24"
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref VPC
+
+  CacheRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  CacheSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref CacheSubnet
+      RouteTableId: !Ref CacheRouteTable
+
+  CacheRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref CacheRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NatGateway
+
+  CacheSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "ElastiCache Security Group"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 6379
+        ToPort: 6379
+        SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+  CacheSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: "Cache Subnet Group"
+      SubnetIds:
+      - !Ref LambdaSubnetA
+      - !Ref LambdaSubnetB
+
+  Cache:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      CacheNodeType: "cache.t2.micro"
+      CacheSubnetGroupName: !Ref CacheSubnetGroup
+      Engine: "redis"
+      NumCacheNodes: "1"
+      VpcSecurityGroupIds:
+      - !Ref CacheSecurityGroup
+
+
+  #####################
+  ## Lambda Function ##
+  #####################
+
+  ElastiCacheLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs8.10
+      Timeout: 30
+      CodeUri: ./target
+      VpcConfig:
+        SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+        SubnetIds:
+        - !Ref LambdaSubnetA
+        - !Ref LambdaSubnetB
+      Policies:
+      - AWSLambdaBasicExecutionRole
+      - AWSLambdaVPCAccessExecutionRole
+      Environment:
+        Variables:
+          REDIS_URL: !Join ["", ["redis://", !GetAtt Cache.RedisEndpoint.Address, ":", !GetAtt Cache.RedisEndpoint.Port]]
+

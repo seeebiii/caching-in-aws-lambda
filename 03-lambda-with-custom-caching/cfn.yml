@@ -1,0 +1,255 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Example of caching with a custom Spring Boot Hazelcast app and accessing it with AWS Lambda.
+
+
+Parameters:
+  S3Bucket:
+    Type: String
+    Description: The S3 bucket where the Spring Boot Hazelcast app was uploaded to.
+  S3Key:
+    Type: String
+    Description: The key of the Spring Boot Hazelcast app jar file which was uploaded to 'S3Bucket'.
+
+
+Resources:
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: "10.0.0.0/16"
+
+  #####################################
+  ## Public Subnet Configuration     ##
+  #####################################
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  GatewayToInternet:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayToInternet
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Join ["", [!Ref "AWS::Region", "a"]]
+      CidrBlock: "10.0.0.0/24"
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: !Ref VPC
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn: GatewayToInternet
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+
+
+  #####################################
+  ## Lambda VPC Subnet Configuration ##
+  #####################################
+
+  LambdaRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  LambdaRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref LambdaRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NatGateway
+
+  LambdaSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Join ["", [!Ref "AWS::Region", "a"]]
+      CidrBlock: "10.0.128.0/18" # ~16k ip's available for Lambda instances
+      VpcId: !Ref VPC
+
+  LambdaSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Join ["", [!Ref "AWS::Region", "b"]]
+      CidrBlock: "10.0.192.0/18" # ~16k ip's available for Lambda instances
+      VpcId: !Ref VPC
+
+  LambdaSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref LambdaSubnetA
+      RouteTableId: !Ref LambdaRouteTable
+
+  LambdaSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref LambdaSubnetB
+      RouteTableId: !Ref LambdaRouteTable
+
+  # don't allow any specific inbound / outbound => by default inbound traffic is allowed from within the security group and
+  # by default all outbound traffic is allowed (though the outbound traffic might be blocked by something else)
+  # => if you need to call a Lambda function from outside this security group, you should allow this somehow here or
+  # put the other function into this security group as well.
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Lambda Security Group"
+      VpcId: !Ref VPC
+
+
+  #############################################
+  ## EC2 Spring Boot Hazelcast Configuration ##
+  #############################################
+
+  CacheSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Join ["", [!Ref "AWS::Region", "a"]]
+      CidrBlock: "10.0.1.0/24"
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref VPC
+
+  CacheRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  CacheSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref CacheSubnet
+      RouteTableId: !Ref CacheRouteTable
+
+  CacheRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref CacheRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref NatGateway
+
+  CacheSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "SpringBootHazelcast Security Group"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: "tcp"
+        FromPort: 5701
+        ToPort: 5701
+        SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+  Ec2InstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Principal:
+            Service:
+            - "ec2.amazonaws.com"
+          Action:
+          - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+      - PolicyName: "root"
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: "Allow"
+            Action:
+            - "s3:Get*"
+            - "s3:List*"
+            Resource:
+            - !Sub arn:aws:s3:::${S3Bucket}
+            - !Sub arn:aws:s3:::${S3Bucket}/*
+
+  RootInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles:
+      - !Ref Ec2InstanceRole
+
+  Ec2Instance:
+    Type: "AWS::EC2::Instance"
+    DependsOn: GatewayToInternet
+    Properties:
+      ImageId: "ami-f316478c"
+      InstanceType: "t2.nano"
+      IamInstanceProfile: !Ref RootInstanceProfile
+      SecurityGroupIds:
+      - !Ref CacheSecurityGroup
+      SubnetId: !Ref CacheSubnet
+      UserData:
+        Fn::Base64:
+          !Sub |
+          #!/usr/bin/env bash
+          aws s3 cp s3://${S3Bucket}/${S3Key} /home/ec2-user/${S3Key}
+          sudo yum -y install java-1.8.0
+          sudo yum -y remove java-1.7.0-openjdk
+          cd /home/ec2-user/
+          sudo nohup java -jar ${S3Key} > ec2dep.log
+
+
+        #####################
+  ## Lambda Function ##
+  #####################
+
+  HazelcastLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: de.sebastianhesse.lambdacaching.HazelcastLambdaFunction
+      Runtime: java8
+      Timeout: 120
+      MemorySize: 256
+      CodeUri: ./lambda/target/lambda.jar
+      VpcConfig:
+        SecurityGroupIds:
+        - !Ref LambdaSecurityGroup
+        SubnetIds:
+        - !Ref LambdaSubnetA
+        - !Ref LambdaSubnetB
+      Policies:
+      - AWSLambdaBasicExecutionRole
+      - AWSLambdaVPCAccessExecutionRole
+      - Version: '2012-10-17'
+        Statement:
+        - Action:
+          - "ec2:DescribeInstances"
+          Resource: "*"
+          Effect: "Allow"
+      Environment:
+        Variables:
+          SPRING_BOOT_HAZELCAST_INSTANCE_IP: !GetAtt Ec2Instance.PrivateIp
+
