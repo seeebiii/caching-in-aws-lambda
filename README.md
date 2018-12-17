@@ -20,6 +20,7 @@ Each folder contains a `deploy.sh` file which lets you easily deploy the related
 You only need to provide a `LAMBDA_BUCKET` environment variable pointing to an S3 bucket where the Lambda function artifacts are uploaded to (necessary for deployment).
 
 
+For further information you can also read my blog post about [Caching in AWS Lambda](https://www.sebastianhesse.de/2018/12/16/caching-in-aws-lambda/) or take a look at the [slides of my talk](https://speakerdeck.com/sebastianhesse/caching-in-aws-lambda).
 
 ## Related Projects
 
